@@ -34,10 +34,20 @@ function cleanup {
 if [[ -v UNINSTALL ]]; then
     echo "Uninstalling Arctis 7+ ChatMix."
     echo "You may need to provide your sudo password for removing udev rule."
+    systemctl --user stop "$SYSTEMD_CONFIG" 2>/dev/null
     cleanup ; exit 0
 fi
 
 echo "Installing Arctis 7+ ChatMix."
+
+echo "Checking Python dependencies..."
+if ! python3 -c 'import usb.core' 2>/dev/null; then
+    echo "FATAL: PyUSB is not installed."
+    echo "  Arch:   sudo pacman -S python-pyusb"
+    echo "  Debian: sudo apt install python3-usb"
+    exit 1
+fi
+
 echo "Installing script to ${SCRIPT_DIR}${SCRIPT}."
 if [[ ! -d "$SCRIPT_DIR" ]]; then
     mkdir -vp $SCRIPT_DIR || \
@@ -62,6 +72,20 @@ if [[ ! -d "$SYSTEMD_DIR" ]]; then
 fi
 cp "${CONFIG_DIR}${SYSTEMD_CONFIG}" "$SYSTEMD_DIR"
 
+# Keep the unit resident outside a login session so ChatMix is already
+# running (and already self-healing) straight after boot. Best-effort:
+# some setups require authentication for this.
+if loginctl show-user "$USER" 2>/dev/null | grep -q "Linger=no"; then
+    echo "Enabling linger for $USER so the service starts at boot."
+    loginctl enable-linger "$USER" || \
+        echo "WARNING: Could not enable linger. Service will start at login instead."
+fi
+
 echo
-echo "Enabling systemd unit $SYSTEMD_CONFIG."
-systemctl --user enable "$SYSTEMD_CONFIG" 2>/dev/null
+echo "Enabling and starting systemd unit $SYSTEMD_CONFIG."
+systemctl --user daemon-reload
+systemctl --user enable --now "$SYSTEMD_CONFIG"
+
+echo
+echo "Done. Check status with: systemctl --user status $SYSTEMD_CONFIG"
+echo "If the dongle was connected during install, logs with: journalctl --user -u $SYSTEMD_CONFIG -f"

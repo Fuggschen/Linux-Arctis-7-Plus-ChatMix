@@ -314,8 +314,12 @@ class Arctis7PlusChatMix:
             except usb.core.USBTimeoutError:
                 pass
             except usb.core.USBError:
+                # A disconnected dongle is recoverable: tear down cleanly and
+                # exit non-zero so systemd restarts us once the device returns.
+                # Exiting 0 here would leave the unit stopped for good, because
+                # the unit is configured with Restart=on-failure.
                 self.log.fatal("USB input/output error - likely disconnect")
-                break
+                self.die_gracefully(trigger="USB device disconnect")
 
     def __handle_sigterm(self, sig, frame):
         self.die_gracefully()
