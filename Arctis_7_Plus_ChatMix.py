@@ -60,6 +60,14 @@ class Arctis7PlusChatMix:
     )
     VAC_NAMES = tuple(name for name, _ in VACS)
 
+    # Byte 0 of the chatmix interrupt report. Other reports share this endpoint
+    # and must not be interpreted as volume.
+    CHATMIX_REPORT_ID = 0x45  # 69
+    # The dongle's reported dial position wobbles by a few counts between reads
+    # even when it is not being touched. Re-issuing set-volume for that jitter
+    # spams volume-change notifications, so only react past this threshold.
+    VOLUME_DEADBAND = 3
+
     def __init__(self):
 
         # set to receive signal from systemd for termination
@@ -358,22 +366,40 @@ class Arctis7PlusChatMix:
                 # read_input[2] returns the value to use for virtual device volume
                 read_input = self.dev.read(self.addr, 64, timeout=1000)
 
+                # The endpoint carries more than just the chatmix report, and the
+                # dongle emits bursts of packets whose values wobble by a few
+                # counts around the true dial position. Applying every one of
+                # those as a set-volume call made the desktop pop a volume
+                # notification roughly once a minute even with the dial idle.
+                # Only 0x45 is the chatmix report; ignore the others.
+                if read_input[0] != self.CHATMIX_REPORT_ID:
+                    continue
+
                 game_val = read_input[1]
                 chat_val = read_input[2]
 
-                # Only update if values changed
-                if game_val != last_game_vol or chat_val != last_chat_vol:
-                    default_device_volume = game_val / 100.0  # wpctl expects 0.0-1.0
-                    virtual_device_volume = chat_val / 100.0
+                if not (0 <= game_val <= 100 and 0 <= chat_val <= 100):
+                    # Out-of-range values are junk (or a different report
+                    # mislabelled); a 0 here would otherwise mute the output.
+                    continue
 
-                    # os.system calls to issue the commands directly to wpctl using node IDs
-                    if self.arctis_game_id:
-                        os.system(f'wpctl set-volume {self.arctis_game_id} {default_device_volume}')
-                    if self.arctis_chat_id:
-                        os.system(f'wpctl set-volume {self.arctis_chat_id} {virtual_device_volume}')
+                # Ignore jitter within +/-3 of the value last applied.
+                if (last_game_vol is not None
+                        and abs(game_val - last_game_vol) <= self.VOLUME_DEADBAND
+                        and abs(chat_val - last_chat_vol) <= self.VOLUME_DEADBAND):
+                    continue
 
-                    last_game_vol = game_val
-                    last_chat_vol = chat_val
+                default_device_volume = game_val / 100.0  # wpctl expects 0.0-1.0
+                virtual_device_volume = chat_val / 100.0
+
+                # os.system calls to issue the commands directly to wpctl using node IDs
+                if self.arctis_game_id:
+                    os.system(f'wpctl set-volume {self.arctis_game_id} {default_device_volume}')
+                if self.arctis_chat_id:
+                    os.system(f'wpctl set-volume {self.arctis_chat_id} {virtual_device_volume}')
+
+                last_game_vol = game_val
+                last_chat_vol = chat_val
             except usb.core.USBTimeoutError:
                 pass
             except usb.core.USBError:
