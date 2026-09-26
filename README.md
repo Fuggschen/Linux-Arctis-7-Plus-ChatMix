@@ -27,8 +27,9 @@ On newer SteelSeries models like the Arctis 7+ and Nova 7 WOW Edition, this two-
 If the user wishes to utilize the chatmix modulation knob, they *must* install the SteelSeries proprietary GG software. This
 software does not currently support Linux.
 
-This script provides a basic workaround for this problem for Linux users. It creates a Virtual Audio Cable (VAC) pair called "Arctis 7+ Chat"
-and "Arctis 7+ Game" respectively, which the user can then assign accordingly as they would have done with an older Arctis model.
+This script provides a basic workaround for this problem for Linux users. It creates a set of Virtual Audio Cable (VAC)
+outputs called "Arctis 7+ Game" and "Arctis 7+ Chat" respectively, which the user can then assign accordingly as they
+would have done with an older Arctis model, plus a third output "Arctis 7+ Media" which the dial does not control.
 
 **Supported Devices:**
 - SteelSeries Arctis 7+ (Product ID: 0x220e)
@@ -100,6 +101,23 @@ systemctl --user status arctis7pcm.service
 
 <br>
 
+### The three outputs ###
+
+| Output | Controlled by the dial? | Use it for |
+| --- | --- | --- |
+| `Arctis 7+ Game` | Yes — dial's Game direction | Games, system sounds. Set as the default sink at startup. |
+| `Arctis 7+ Chat` | Yes — dial's Chat direction | Discord, game voice chat, VoIP |
+| `Arctis 7+ Media` | **No** — volume is left alone | Music, podcasts, anything you don't want the knob moving |
+
+`Arctis 7+ Game` is set as the default sink every time the service starts, so new applications land on it. To keep
+media out of the dial's way, point the media player at `Arctis 7+ Media` specifically — leave everything else on the
+default.
+
+All three are plain PipeWire sinks, so they work with per-application output selection in your mixer, and they can be
+used as the tail for a filter chain (e.g. EasyEffects) if you want processing on a specific channel.
+
+<br>
+
 ## Service management
 <br>
 
@@ -126,7 +144,12 @@ Stopping the service is safe: it destroys the virtual sinks and restores your pr
 ## Implementation - How it works
 <br>
 
-The service first initializes the VAC by making direct calls to PipeWire's `pw-cli` to create `nodes` and `pw-link` to connect them to the default audio device.
+The service first initializes the VACs by making direct calls to PipeWire's `pw-cli` to create `nodes` and `pw-link` to connect them to the default audio device. Three sinks are created: `Arctis_Game`, `Arctis_Chat` and `Arctis_Media`, each with both of its monitor ports routed to the default device.
+
+PipeWire can occasionally bring a `support.null-audio-sink` up with only one of its two monitor ports registered
+(`monitor_1`/right present, `monitor_0`/left missing), which makes the sink output on one channel only. The service
+therefore waits for both ports to appear after creating each node and rebuilds the node if either is missing, and it
+verifies that all six monitor links exist before reporting itself enabled.
 
 The service relies on the [PyUSB](https://github.com/walac/pyusb) package to read interrupt transfers from the headset's USB dongle.
 

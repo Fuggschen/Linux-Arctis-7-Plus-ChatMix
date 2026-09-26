@@ -48,6 +48,18 @@ def wait_for_pipewire(max_attempts=10, delay=0.5):
 
 
 class Arctis7PlusChatMix:
+
+    # Arctis_Media is a third, knob-independent channel: it is created and
+    # routed like the other two but its volume is never touched by the dial,
+    # so music routed to it stays at a constant level. Point media players at
+    # it when you want audio the chatmix knob will not affect.
+    VACS = (
+        ("Arctis_Game", "Arctis 7+ Game"),
+        ("Arctis_Chat", "Arctis 7+ Chat"),
+        ("Arctis_Media", "Arctis 7+ Media"),
+    )
+    VAC_NAMES = tuple(name for name, _ in VACS)
+
     def __init__(self):
 
         # set to receive signal from systemd for termination
@@ -186,38 +198,37 @@ class Arctis7PlusChatMix:
 
         # Destroy virtual sinks if they already existed incase of previous failure:
         try:
-            destroy_a7p_game = os.system("pw-cli destroy Arctis_Game 2>/dev/null")
-            destroy_a7p_chat = os.system("pw-cli destroy Arctis_Chat 2>/dev/null")
-            if destroy_a7p_game == 0 or destroy_a7p_chat == 0:
+            destroyed = 0
+            for name in self.VAC_NAMES:
+                destroyed |= os.system(f"pw-cli destroy {name} 2>/dev/null")
+            if destroyed == 0:
                 raise Exception
         except Exception as e:
             self.log.info("""Attempted to destroy old VAC sinks at init but none existed""")
 
-        # Instantiate our virtual sinks - Arctis_Chat and Arctis_Game
+        # Instantiate our virtual sinks - Arctis_Chat, Arctis_Game, Arctis_Media
         try:
             self.log.info("Creating VACS...")
             # NOTE: object.linger=true is REQUIRED. Without it pw-cli create-node
             # exits 0 but produces no node at all, and the failure is silent.
-            for name, desc in (("Arctis_Game", "Arctis 7+ Game"),
-                               ("Arctis_Chat", "Arctis 7+ Chat")):
+            for name, desc in self.VACS:
                 if not self._create_vac(name, desc):
-                    self.die_gracefully(sink_creation_fail=True,
-                                        trigger=f"VAC node adapter ({name})")
-                # Serialise creation. Creating both nodes back-to-back races
-                # PipeWire's port registration and the second node comes up
+                    self.die_gracefully(trigger=f"VAC node adapter ({name})")
+                # Serialise creation. Creating the nodes back-to-back races
+                # PipeWire's port registration and the later ones can come up
                 # missing monitor_0 (FL) -- see _create_vac.
                 time.sleep(1.0)
 
         except Exception as E:
             self.log.error("""Failure to create node adapter - 
             Arctis_Chat virtual device could not be created""", exc_info=True)
-            self.die_gracefully(sink_creation_fail=True, trigger="VAC node adapter")
+            self.die_gracefully(trigger="VAC node adapter")
 
         #route the virtual sink's L&R channels to the default system output's LR
         try:
             self.log.info("Assigning VAC sink monitors output to default device...")
             failed = []
-            for sink in ("Arctis_Game", "Arctis_Chat"):
+            for sink in self.VAC_NAMES:
                 for ch in ("FL", "FR"):
                     if not self._link(f"{sink}:monitor_{ch}",
                                      f"{default_sink}:playback_{ch}"):
@@ -227,13 +238,13 @@ class Arctis7PlusChatMix:
                 # A half-wired graph is the bug this guards against: the daemon
                 # would otherwise run happily with one channel silently missing.
                 self.log.error("Failed to link channels: " + ", ".join(failed))
-                self.die_gracefully(sink_fail=True, trigger="LR links")
-            self.log.info("All 4 monitor links established (Game/Chat L+R).")
+                self.die_gracefully(trigger="LR links")
+            self.log.info("All 6 monitor links established (Game/Chat/Media L+R).")
 
         except Exception as e:
             self.log.error("""Couldn't create the links to 
             pipe LR from VAC to default device""", exc_info=True)
-            self.die_gracefully(sink_fail=True, trigger="LR links")
+            self.die_gracefully(trigger="LR links")
         
         # set the default sink to Arctis Game by finding its ID
         try:
@@ -376,7 +387,7 @@ class Arctis7PlusChatMix:
     def __handle_sigterm(self, sig, frame):
         self.die_gracefully()
 
-    def die_gracefully(self, sink_creation_fail=False, trigger=None):
+    def die_gracefully(self, trigger=None):
         """Kill the process and remove the VACs
         on fatal exceptions or SIGTERM / SIGINT
         """
@@ -392,11 +403,12 @@ class Arctis7PlusChatMix:
             if sink_id_match:
                 os.system(f"wpctl set-default {sink_id_match.group(1)}")
 
-        # cleanup virtual sinks if they exist
-        if  sink_creation_fail == False:
-            self.log.info("Destroying virtual sinks...")
-            os.system("pw-cli destroy Arctis_Game 1>/dev/null")
-            os.system("pw-cli destroy Arctis_Chat 1>/dev/null")
+        # Cleanup virtual sinks. Done unconditionally: destroying a node that
+        # was never created is a harmless no-op, whereas skipping it leaves
+        # orphaned sinks behind (and, with object.linger, stale port names).
+        self.log.info("Destroying virtual sinks...")
+        for name in self.VAC_NAMES:
+            os.system(f"pw-cli destroy {name} 1>/dev/null 2>/dev/null")
 
         if trigger is not None:
             self.log.info("-"*45)
