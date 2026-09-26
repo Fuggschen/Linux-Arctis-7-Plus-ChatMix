@@ -23,6 +23,7 @@ import os
 import sys
 import signal
 import logging
+import subprocess
 import traceback
 import re
 import json
@@ -195,30 +196,17 @@ class Arctis7PlusChatMix:
         # Instantiate our virtual sinks - Arctis_Chat and Arctis_Game
         try:
             self.log.info("Creating VACS...")
-            os.system("""pw-cli create-node adapter '{ 
-                factory.name=support.null-audio-sink 
-                node.name=Arctis_Game 
-                node.description="Arctis 7+ Game" 
-                media.class=Audio/Sink 
-                monitor.channel-volumes=true 
-                object.linger=true 
-                audio.position=[FL FR]
-                }' 1>/dev/null
-            """)
-
-            os.system("""pw-cli create-node adapter '{ 
-                factory.name=support.null-audio-sink 
-                node.name=Arctis_Chat 
-                node.description="Arctis 7+ Chat" 
-                media.class=Audio/Sink 
-                monitor.channel-volumes=true 
-                object.linger=true 
-                audio.position=[FL FR]
-                }' 1>/dev/null
-            """)
-
-            # Wait for sinks to appear in PipeWire
-            time.sleep(0.5)
+            # NOTE: object.linger=true is REQUIRED. Without it pw-cli create-node
+            # exits 0 but produces no node at all, and the failure is silent.
+            for name, desc in (("Arctis_Game", "Arctis 7+ Game"),
+                               ("Arctis_Chat", "Arctis 7+ Chat")):
+                if not self._create_vac(name, desc):
+                    self.die_gracefully(sink_creation_fail=True,
+                                        trigger=f"VAC node adapter ({name})")
+                # Serialise creation. Creating both nodes back-to-back races
+                # PipeWire's port registration and the second node comes up
+                # missing monitor_0 (FL) -- see _create_vac.
+                time.sleep(1.0)
 
         except Exception as E:
             self.log.error("""Failure to create node adapter - 
@@ -228,18 +216,19 @@ class Arctis7PlusChatMix:
         #route the virtual sink's L&R channels to the default system output's LR
         try:
             self.log.info("Assigning VAC sink monitors output to default device...")
+            failed = []
+            for sink in ("Arctis_Game", "Arctis_Chat"):
+                for ch in ("FL", "FR"):
+                    if not self._link(f"{sink}:monitor_{ch}",
+                                     f"{default_sink}:playback_{ch}"):
+                        failed.append(f"{sink}:{ch}")
 
-            os.system(f'pw-link "Arctis_Game:monitor_FL" '
-            f'"{default_sink}:playback_FL" 1>/dev/null')
-
-            os.system(f'pw-link "Arctis_Game:monitor_FR" '
-            f'"{default_sink}:playback_FR" 1>/dev/null')
-
-            os.system(f'pw-link "Arctis_Chat:monitor_FL" '
-            f'"{default_sink}:playback_FL" 1>/dev/null')
-
-            os.system(f'pw-link "Arctis_Chat:monitor_FR" '
-            f'"{default_sink}:playback_FR" 1>/dev/null')
+            if failed:
+                # A half-wired graph is the bug this guards against: the daemon
+                # would otherwise run happily with one channel silently missing.
+                self.log.error("Failed to link channels: " + ", ".join(failed))
+                self.die_gracefully(sink_fail=True, trigger="LR links")
+            self.log.info("All 4 monitor links established (Game/Chat L+R).")
 
         except Exception as e:
             self.log.error("""Couldn't create the links to 
@@ -274,6 +263,69 @@ class Arctis7PlusChatMix:
             self.log.warning(f"Could not set Arctis_Game as default sink: {e}")
             self.arctis_game_id = None
             self.arctis_chat_id = None
+
+    def _ports_present(self, name):
+        """True once both monitor ports of a VAC node have been registered."""
+        out = os.popen("pw-cli list-objects Port 2>/dev/null").read()
+        return all(f"{name}:monitor_{i}" in out for i in (0, 1))
+
+    def _create_vac(self, name, desc, attempts=4):
+        """Create one null-audio-sink, retrying until it has both monitor ports.
+
+        PipeWire can bring a null-audio-sink up with only one of its two monitor
+        ports registered (monitor_1/FR present, monitor_0/FL missing), which
+        happens when the two VACs are created back-to-back. The node then
+        accepts audio on the right channel only, and `pw-link` on the missing
+        port fails with ENOENT. Because the original code never checked, the
+        daemon started "successfully" with a half-wired graph.
+
+        So: create, wait for the ports, and if any are missing destroy and
+        rebuild the node.
+        """
+        for attempt in range(1, attempts + 1):
+            os.system(f"""pw-cli create-node adapter '{{ 
+                factory.name=support.null-audio-sink 
+                node.name={name} 
+                node.description="{desc}" 
+                media.class=Audio/Sink 
+                monitor.channel-volumes=true 
+                object.linger=true 
+                audio.position=[FL FR]
+                }}' 1>/dev/null
+            """)
+
+            for _ in range(20):          # up to ~2s for ports to register
+                if self._ports_present(name):
+                    return True
+                time.sleep(0.1)
+
+            self.log.warning(
+                f"{name} came up without both monitor ports "
+                f"(attempt {attempt}/{attempts}); rebuilding")
+            os.system(f"pw-cli destroy {name} 1>/dev/null 2>/dev/null")
+            time.sleep(1.0)
+
+        return False
+
+    def _link(self, src, dst, attempts=10, delay=0.3):
+        """Create a single pw-link, retrying until both port names resolve.
+
+        PipeWire registers a newly created node's ports asynchronously, so a
+        link attempted too early fails with ENOENT. The original code linked
+        once after a fixed sleep and ignored the result, so a missed link was
+        invisible: the daemon ran on with a half-wired graph. Retry instead,
+        and report failure to the caller.
+        """
+        err = ""
+        for _ in range(attempts):
+            r = subprocess.run(['pw-link', src, dst],
+                               capture_output=True, text=True)
+            if r.returncode == 0:
+                return True
+            err = (r.stderr or "").strip()
+            time.sleep(delay)
+        self.log.error(f"link {src} -> {dst} failed after {attempts} tries: {err}")
+        return False
 
     def start_modulator_signal(self):
         """Listen to the USB device for modulator knob's signal 
