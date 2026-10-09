@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import argparse
-import json
 import logging
 import os
 import signal
@@ -13,8 +12,7 @@ from pathlib import Path
 try:
     from .config import ChatMixConfig, default_config_path
     from .win_audio import AudioController, list_audio_devices
-except ImportError:  # pragma: no cover - direct script execution on Windows
-    import sys
+except ImportError:
     sys.path.insert(0, str(Path(__file__).resolve().parent))
     from config import ChatMixConfig, default_config_path
     from win_audio import AudioController, list_audio_devices
@@ -35,7 +33,6 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--run-in-background", action="store_true", help="Spawn a background process")
     parser.add_argument("--debug", action="store_true", help="Enable debug logging")
     parser.add_argument("--create-sample-config", action="store_true", help="Write a sample config file")
-    parser.add_argument("--ui", action="store_true", help="Open the configuration UI")
     return parser
 
 
@@ -72,9 +69,6 @@ class ChatMixWindowsController:
         file_handler.setFormatter(formatter)
         logger.addHandler(file_handler)
 
-        stream_handler = logging.StreamHandler()
-        stream_handler.setFormatter(formatter)
-        logger.addHandler(stream_handler)
         return logger
 
     def _handle_signal(self, signum, frame):
@@ -94,7 +88,7 @@ class ChatMixWindowsController:
 
             self.log.warning("No supported headset found yet.")
             return None
-        except Exception as exc:  # pragma: no cover - environment dependent
+        except Exception as exc:
             self.log.exception("Unable to enumerate USB devices: %s", exc)
             return None
 
@@ -114,7 +108,7 @@ class ChatMixWindowsController:
 
             self.log.warning("No USB HID endpoint discovered for this headset.")
             return False
-        except Exception as exc:  # pragma: no cover - environment dependent
+        except Exception as exc:
             self.log.exception("Unable to claim USB endpoint: %s", exc)
             return False
 
@@ -128,12 +122,12 @@ class ChatMixWindowsController:
         self.audio.set_volume_for_targets(self.config.game_targets, game_vol)
         self.audio.set_volume_for_targets(self.config.chat_targets, chat_vol)
 
-        # Keep the media target at a fixed background level instead of changing it with the dial.
         if self.config.media_targets:
             self.audio.set_volume_for_targets(self.config.media_targets, self.config.media_level)
 
     def run_loop(self):
         self.log.info("Starting chatmix poll loop.")
+        self.log.info("Config: game_targets=%s, chat_targets=%s, media_targets=%s", self.config.game_targets, self.config.chat_targets, self.config.media_targets)
 
         while not self.should_stop:
             if self.device is None:
@@ -181,7 +175,7 @@ class ChatMixWindowsController:
                 self.device = None
                 self.endpoint_address = None
                 time.sleep(2.0)
-            except Exception as exc:  # pragma: no cover - environment dependent
+            except Exception as exc:
                 self.log.exception("Unhandled polling error: %s", exc)
                 time.sleep(1.0)
 
@@ -194,7 +188,6 @@ def main() -> int:
     parser = _build_parser()
     args = parser.parse_args()
 
-    # Setup basic logging for errors during startup
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s | %(levelname)s | %(message)s"
@@ -257,24 +250,12 @@ def main() -> int:
             print("Background process spawned.")
             return 0
 
-        # Default to UI if no specific command is given
-        if args.ui or (not args.tray and not args.list_devices and not args.install_autostart and not args.remove_autostart and not args.run_in_background and not args.create_sample_config):
-            try:
-                from ui import run_ui
-                return run_ui(args.config)
-            except Exception as exc:
-                logging.error(f"Failed to start UI: {exc}")
-                logging.error(f"Falling back to headless mode. Logs available at: {config.log_path}")
-                controller = ChatMixWindowsController(config)
-                controller.run()
-                return 1
-
+        # Default: run the service
         if args.tray:
-            controller = ChatMixWindowsController(config)
-            controller.run()
-            return 0
+            print(f"Running in background mode. Logs at: {config.log_path}")
+        else:
+            print(f"ChatMix Windows starting. Logs at: {config.log_path}")
 
-        # Fallback to headless mode
         controller = ChatMixWindowsController(config)
         controller.run()
         return 0
@@ -287,17 +268,17 @@ def main() -> int:
 if __name__ == "__main__":
     raise SystemExit(main())
 
-
-# Windows usage examples:
-#   ChatMixWindows.exe                      (open UI by default)
-#   ChatMixWindows.exe --ui                 (explicitly open UI)
-#   ChatMixWindows.exe --tray               (run in background)
-#   ChatMixWindows.exe --list-devices       (show devices)
-#   ChatMixWindows.exe --install-autostart  (add to Windows startup)
-#   ChatMixWindows.exe --create-sample-config (generate config)
-
 """
-This is a Windows rewrite of the original Linux PipeWire-based ChatMix service.
-It keeps the same fundamental concept (read headset dial, adjust game/chat mix values)
-but targets the Windows audio stack instead of PipeWire.
+Windows ChatMix service for SteelSeries Arctis 7+/Nova 7 WOW Edition
+
+Usage:
+    ChatMixWindows.exe                      (run service in foreground)
+    ChatMixWindows.exe --tray               (run service in background)
+    ChatMixWindows.exe --list-devices       (show available devices)
+    ChatMixWindows.exe --install-autostart  (add to Windows startup)
+    ChatMixWindows.exe --remove-autostart   (remove from Windows startup)
+    ChatMixWindows.exe --create-sample-config (generate default config)
+
+Default behavior: starts the service in foreground with output to console.
+Logs are always written to: %APPDATA%\Local\ChatMixWindows\chatmix.log
 """

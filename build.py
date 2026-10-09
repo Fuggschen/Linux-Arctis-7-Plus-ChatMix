@@ -69,7 +69,7 @@ def _build_executable():
         "-m",
         "PyInstaller",
         "--onefile",
-        "--windowed",
+        "--console",  # Use console to show startup messages and errors
         "--name",
         "ChatMixWindows",
         "--add-data",
@@ -133,8 +133,8 @@ def main() -> int:
     print("Executable created at: dist/ChatMixWindows.exe")
     print("")
     print("Usage:")
-    print("  ChatMixWindows.exe                      (open UI by default)")
-    print("  ChatMixWindows.exe --tray               (run in background)")
+    print("  ChatMixWindows.exe                      (run service in foreground)")
+    print("  ChatMixWindows.exe --tray               (run service in background)")
     print("  ChatMixWindows.exe --list-devices       (show devices)")
     print("  ChatMixWindows.exe --install-autostart  (add to Windows startup)")
     print("")
