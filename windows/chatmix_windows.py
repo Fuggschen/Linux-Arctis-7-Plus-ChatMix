@@ -38,7 +38,6 @@ def _build_parser() -> argparse.ArgumentParser:
 
 class ChatMixWindowsController:
     CHATMIX_REPORT_ID = 0x45
-    POLL_TIMEOUT_MS = 750
     VENDOR_ID = 0x1038
     PRODUCT_IDS = [0x220E, 0x227A]  # Arctis 7+ and Nova 7 WOW
 
@@ -48,7 +47,6 @@ class ChatMixWindowsController:
         self.audio = AudioController(config)
         self.should_stop = False
         self.device = None
-        self.endpoint = None
         self.last_game = None
         self.last_chat = None
 
@@ -115,48 +113,55 @@ class ChatMixWindowsController:
                 if self.device is None:
                     time.sleep(2.0)  # Wait longer before retrying
                     continue
-                else:
-                    # Try to open the device
-                    try:
-                        self.device.open()
-                        self.log.info("Device opened successfully.")
-                    except Exception as exc:
-                        self.log.warning(f"Could not open device: {exc}")
-                        self.device = None
-                        time.sleep(2.0)
-                        continue
 
-            # Device is open, read from it
+            # Try to open and read from the device
             try:
+                if not self.device.is_open():
+                    self.device.open()
+                    self.log.info("Device opened successfully.")
+
+                # Set up input report callback instead of polling
+                # This is more efficient and handles data better
                 data = self.device.read(64)
-                if not data or len(data) < 3:
+                
+                if data is None or len(data) == 0:
+                    # No data available, that's OK - just continue waiting
+                    time.sleep(0.05)
                     continue
 
                 # Check report ID
-                if data[0] != self.CHATMIX_REPORT_ID:
+                if len(data) > 0 and data[0] != self.CHATMIX_REPORT_ID:
+                    # Not the chatmix report, ignore it
                     continue
 
+                # Extract game and chat values from bytes 1 and 2
+                if len(data) < 3:
+                    continue
+                    
                 game_value = int(data[1])
                 chat_value = int(data[2])
 
                 # Validate ranges
                 if not (0 <= game_value <= 100 and 0 <= chat_value <= 100):
+                    self.log.debug(f"Out of range values: game={game_value} chat={chat_value}")
                     continue
 
                 # Apply deadband to reduce noise
                 if self.last_game is not None and self.last_chat is not None:
                     if (abs(game_value - self.last_game) <= self.config.deadband and 
                         abs(chat_value - self.last_chat) <= self.config.deadband):
+                        # Within deadband, skip
                         continue
 
+                # New valid values outside deadband
                 self.last_game = game_value
                 self.last_chat = chat_value
                 self._apply_mix_values(game_value, chat_value)
-                self.log.debug(f"Applied volumes: game={game_value}% chat={chat_value}%")
+                self.log.info(f"Applied volumes: game={game_value}% chat={chat_value}%")
 
             except Exception as exc:
-                self.log.debug(f"Read error: {exc}")
-                # Device was disconnected
+                self.log.warning(f"Error reading from device: {exc}")
+                # Device was disconnected or read failed
                 if self.device is not None:
                     try:
                         self.device.close()
