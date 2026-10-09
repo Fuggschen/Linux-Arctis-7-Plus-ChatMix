@@ -29,7 +29,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--list-devices", action="store_true", help="List audio and USB devices")
     parser.add_argument("--install-autostart", action="store_true", help="Install a Windows Startup shortcut")
     parser.add_argument("--remove-autostart", action="store_true", help="Remove the Startup shortcut")
-    parser.add_argument("--tray", action="store_true", help="Run in tray/background mode")
+    parser.add_argument("--tray", action="store_true", help="Run in background mode")
     parser.add_argument("--run-in-background", action="store_true", help="Spawn a background process")
     parser.add_argument("--debug", action="store_true", help="Enable debug logging")
     parser.add_argument("--create-sample-config", action="store_true", help="Write a sample config file")
@@ -78,18 +78,25 @@ class ChatMixWindowsController:
     def find_headset(self):
         try:
             import usb.core
+            import usb.backend.libusb1
+
+            # Try to get libusb1 backend explicitly
+            backend = usb.backend.libusb1.get_backend()
+            if backend is None:
+                self.log.error("LibUSB backend not available. Install libusb drivers.")
+                return None
 
             for product_id in self.config.product_ids:
-                dev = usb.core.find(idVendor=self.config.vendor_id, idProduct=product_id)
+                dev = usb.core.find(idVendor=self.config.vendor_id, idProduct=product_id, backend=backend)
                 if dev is not None:
                     self.device = dev
                     self.log.info("Found supported SteelSeries headset: vendor=0x%04x product=0x%04x", self.config.vendor_id, product_id)
                     return dev
 
-            self.log.warning("No supported headset found yet.")
+            self.log.debug("No supported headset found yet.")
             return None
         except Exception as exc:
-            self.log.exception("Unable to enumerate USB devices: %s", exc)
+            self.log.debug("USB scan error: %s", exc)
             return None
 
     def attach_to_hid_endpoint(self):
@@ -128,13 +135,15 @@ class ChatMixWindowsController:
     def run_loop(self):
         self.log.info("Starting chatmix poll loop.")
         self.log.info("Config: game_targets=%s, chat_targets=%s, media_targets=%s", self.config.game_targets, self.config.chat_targets, self.config.media_targets)
+        self.log.info("Looking for SteelSeries Arctis headset (vendor=0x%04x)...", self.config.vendor_id)
 
         while not self.should_stop:
             if self.device is None:
                 self.device = self.find_headset()
                 if self.device is not None:
                     self.attach_to_hid_endpoint()
-                time.sleep(1.0)
+                else:
+                    time.sleep(2.0)  # Longer wait if no device found
                 continue
 
             if self.endpoint_address is None:
@@ -205,20 +214,28 @@ def main() -> int:
         config.debug = args.debug or config.debug
 
         if args.list_devices:
-            print("Audio devices:")
+            print("\n=== Audio Devices ===")
             for device in list_audio_devices():
                 print(f" - {device}")
 
+            print("\n=== USB Devices ===")
             try:
                 import usb.core
-                print("\nUSB devices:")
-                for dev in usb.core.find(find_all=True):
-                    try:
-                        print(f" - vendor=0x{dev.idVendor:04x} product=0x{dev.idProduct:04x}")
-                    except Exception:
-                        pass
+                import usb.backend.libusb1
+                
+                backend = usb.backend.libusb1.get_backend()
+                if backend is None:
+                    print("  (No libusb backend available - USB HID access won't work)")
+                    print("  Install libusb from: https://github.com/libusb/libusb/releases")
+                else:
+                    for dev in usb.core.find(find_all=True, backend=backend):
+                        try:
+                            print(f" - vendor=0x{dev.idVendor:04x} product=0x{dev.idProduct:04x}")
+                        except Exception:
+                            pass
             except Exception as exc:
-                print(f"Unable to enumerate USB devices: {exc}")
+                print(f"  Error: {exc}")
+            print()
             return 0
 
         if args.install_autostart:
@@ -252,16 +269,23 @@ def main() -> int:
 
         # Default: run the service
         if args.tray:
-            print(f"Running in background mode. Logs at: {config.log_path}")
+            print(f"Running in background mode. Logs: {config.log_path}")
         else:
-            print(f"ChatMix Windows starting. Logs at: {config.log_path}")
+            print(f"ChatMix Windows starting.")
+            print(f"Logs: {config.log_path}")
+            print()
 
         controller = ChatMixWindowsController(config)
         controller.run()
         return 0
 
+    except KeyboardInterrupt:
+        print("\nShutdown requested.")
+        return 0
     except Exception as exc:
         logging.exception(f"Fatal error: {exc}")
+        print(f"\nERROR: {exc}")
+        print(f"See logs at: {config.log_path if 'config' in locals() else DEFAULT_LOG_PATH}")
         return 1
 
 
@@ -279,6 +303,6 @@ Usage:
     ChatMixWindows.exe --remove-autostart   (remove from Windows startup)
     ChatMixWindows.exe --create-sample-config (generate default config)
 
-Default behavior: starts the service in foreground with output to console.
-Logs are always written to: %APPDATA%\Local\ChatMixWindows\chatmix.log
+Note: Requires libusb drivers for USB HID access.
+Download from: https://github.com/libusb/libusb/releases
 """
