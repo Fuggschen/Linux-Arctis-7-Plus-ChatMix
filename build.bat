@@ -54,11 +54,10 @@ if exist *.spec del *.spec >nul 2>&1
 
 echo.
 echo [4/5] Building executable...
-REM Build the main executable with PyInstaller
+REM Build the main executable with PyInstaller (without icon)
 pyinstaller --onefile ^
     --windowed ^
     --name ChatMixWindows ^
-    --icon=windows/icon.ico ^
     --add-data "windows:windows" ^
     --collect-all pycaw ^
     --collect-all usb ^

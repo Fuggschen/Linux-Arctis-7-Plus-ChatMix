@@ -47,7 +47,6 @@ echo "[4/5] Building executable..."
 python3 -m PyInstaller --onefile \
     --windowed \
     --name ChatMixWindows \
-    --icon=windows/icon.ico \
     --add-data "windows:windows" \
     --collect-all pycaw \
     --collect-all usb \

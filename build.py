@@ -62,7 +62,6 @@ def _cleanup_old_builds():
 
 
 def _build_executable():
-    icon_path = Path(__file__).parent / "windows" / "icon.ico"
     script_path = Path(__file__).parent / "windows" / "chatmix_windows.py"
 
     cmd = [
@@ -73,12 +72,6 @@ def _build_executable():
         "--windowed",
         "--name",
         "ChatMixWindows",
-    ]
-
-    if icon_path.exists():
-        cmd.extend(["--icon", str(icon_path)])
-
-    cmd.extend([
         "--add-data",
         f"{Path('windows').absolute()}{os.pathsep}windows",
         "--collect-all",
@@ -90,7 +83,7 @@ def _build_executable():
         "--hidden-import=usb.backend",
         "--hidden-import=usb.backend.libusb1",
         str(script_path),
-    ])
+    ]
 
     return subprocess.run(cmd, check=False).returncode == 0
 
