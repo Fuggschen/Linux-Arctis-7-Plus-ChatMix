@@ -133,9 +133,10 @@ def main() -> int:
     print("Executable created at: dist/ChatMixWindows.exe")
     print("")
     print("Usage:")
-    print("  ChatMixWindows.exe --ui              (open configuration UI)")
-    print("  ChatMixWindows.exe --tray            (run in background)")
-    print("  ChatMixWindows.exe --install-autostart (add to Windows startup)")
+    print("  ChatMixWindows.exe                      (open UI by default)")
+    print("  ChatMixWindows.exe --tray               (run in background)")
+    print("  ChatMixWindows.exe --list-devices       (show devices)")
+    print("  ChatMixWindows.exe --install-autostart  (add to Windows startup)")
     print("")
     return 0
 

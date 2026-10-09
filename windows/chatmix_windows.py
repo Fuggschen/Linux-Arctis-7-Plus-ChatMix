@@ -15,7 +15,7 @@ try:
     from .win_audio import AudioController, list_audio_devices
 except ImportError:  # pragma: no cover - direct script execution on Windows
     import sys
-    sys.path.append(str(Path(__file__).resolve().parent))
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
     from config import ChatMixConfig, default_config_path
     from win_audio import AudioController, list_audio_devices
 
@@ -35,6 +35,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--run-in-background", action="store_true", help="Spawn a background process")
     parser.add_argument("--debug", action="store_true", help="Enable debug logging")
     parser.add_argument("--create-sample-config", action="store_true", help="Write a sample config file")
+    parser.add_argument("--ui", action="store_true", help="Open the configuration UI")
     return parser
 
 
@@ -52,8 +53,11 @@ class ChatMixWindowsController:
         self.last_game = None
         self.last_chat = None
 
-        signal.signal(signal.SIGINT, self._handle_signal)
-        signal.signal(signal.SIGTERM, self._handle_signal)
+        try:
+            signal.signal(signal.SIGINT, self._handle_signal)
+            signal.signal(signal.SIGTERM, self._handle_signal)
+        except Exception:
+            pass
 
     def _configure_logging(self):
         logger = logging.getLogger("chatmix_windows")
@@ -190,71 +194,94 @@ def main() -> int:
     parser = _build_parser()
     args = parser.parse_args()
 
-    if args.create_sample_config:
-        config_path = Path(args.config)
-        config = ChatMixConfig()
-        config.save(str(config_path))
-        print(f"Sample config written to {config_path}")
-        return 0
+    # Setup basic logging for errors during startup
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s | %(levelname)s | %(message)s"
+    )
 
-    config = ChatMixConfig.load(args.config)
-    config.debug = args.debug or config.debug
+    try:
+        if args.create_sample_config:
+            config_path = Path(args.config)
+            config = ChatMixConfig()
+            config.save(str(config_path))
+            print(f"Sample config written to {config_path}")
+            return 0
 
-    if args.list_devices:
-        print("Audio devices:")
-        for device in list_audio_devices():
-            print(f" - {device}")
+        config = ChatMixConfig.load(args.config)
+        config.debug = args.debug or config.debug
 
-        try:
-            import usb.core
-            print("\nUSB devices:")
-            for dev in usb.core.find(find_all=True):
-                try:
-                    print(f" - vendor=0x{dev.idVendor:04x} product=0x{dev.idProduct:04x}")
-                except Exception:
-                    pass
-        except Exception as exc:
-            print(f"Unable to enumerate USB devices: {exc}")
-        return 0
+        if args.list_devices:
+            print("Audio devices:")
+            for device in list_audio_devices():
+                print(f" - {device}")
 
-    if args.install_autostart:
-        from autostart import install_autostart
-        install_autostart(args.config)
-        return 0
+            try:
+                import usb.core
+                print("\nUSB devices:")
+                for dev in usb.core.find(find_all=True):
+                    try:
+                        print(f" - vendor=0x{dev.idVendor:04x} product=0x{dev.idProduct:04x}")
+                    except Exception:
+                        pass
+            except Exception as exc:
+                print(f"Unable to enumerate USB devices: {exc}")
+            return 0
 
-    if args.remove_autostart:
-        from autostart import remove_autostart
-        remove_autostart()
-        return 0
+        if args.install_autostart:
+            from autostart import install_autostart
+            install_autostart(args.config)
+            return 0
 
-    if args.run_in_background:
-        if os.name != "nt":
-            print("Background execution is only supported on Windows.")
-            return 1
+        if args.remove_autostart:
+            from autostart import remove_autostart
+            remove_autostart()
+            return 0
 
-        subprocess.Popen(
-            [
-                sys.executable,
-                str(Path(__file__).resolve()),
-                "--tray",
-                "--config",
-                args.config,
-            ],
-            creationflags=subprocess.CREATE_NO_WINDOW,
-            shell=False,
-        )
-        print("Background process spawned.")
-        return 0
+        if args.run_in_background:
+            if os.name != "nt":
+                print("Background execution is only supported on Windows.")
+                return 1
 
-    if args.tray:
-        print("Tray/background mode: running headless.")
+            subprocess.Popen(
+                [
+                    sys.executable,
+                    str(Path(__file__).resolve()),
+                    "--tray",
+                    "--config",
+                    args.config,
+                ],
+                creationflags=subprocess.CREATE_NO_WINDOW,
+                shell=False,
+            )
+            print("Background process spawned.")
+            return 0
+
+        # Default to UI if no specific command is given
+        if args.ui or (not args.tray and not args.list_devices and not args.install_autostart and not args.remove_autostart and not args.run_in_background and not args.create_sample_config):
+            try:
+                from ui import run_ui
+                return run_ui(args.config)
+            except Exception as exc:
+                logging.error(f"Failed to start UI: {exc}")
+                logging.error(f"Falling back to headless mode. Logs available at: {config.log_path}")
+                controller = ChatMixWindowsController(config)
+                controller.run()
+                return 1
+
+        if args.tray:
+            controller = ChatMixWindowsController(config)
+            controller.run()
+            return 0
+
+        # Fallback to headless mode
         controller = ChatMixWindowsController(config)
         controller.run()
         return 0
 
-    controller = ChatMixWindowsController(config)
-    controller.run()
-    return 0
+    except Exception as exc:
+        logging.exception(f"Fatal error: {exc}")
+        return 1
 
 
 if __name__ == "__main__":
@@ -262,11 +289,12 @@ if __name__ == "__main__":
 
 
 # Windows usage examples:
-#   python windows/chatmix_windows.py --create-sample-config
-#   python windows/chatmix_windows.py --list-devices
-#   python windows/chatmix_windows.py --install-autostart
-#   python windows/chatmix_windows.py --run-in-background
-#   python windows/chatmix_windows.py --tray
+#   ChatMixWindows.exe                      (open UI by default)
+#   ChatMixWindows.exe --ui                 (explicitly open UI)
+#   ChatMixWindows.exe --tray               (run in background)
+#   ChatMixWindows.exe --list-devices       (show devices)
+#   ChatMixWindows.exe --install-autostart  (add to Windows startup)
+#   ChatMixWindows.exe --create-sample-config (generate config)
 
 """
 This is a Windows rewrite of the original Linux PipeWire-based ChatMix service.
