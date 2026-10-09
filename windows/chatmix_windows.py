@@ -39,6 +39,8 @@ def _build_parser() -> argparse.ArgumentParser:
 class ChatMixWindowsController:
     CHATMIX_REPORT_ID = 0x45
     POLL_TIMEOUT_MS = 750
+    VENDOR_ID = 0x1038
+    PRODUCT_IDS = [0x220E, 0x227A]  # Arctis 7+ and Nova 7 WOW
 
     def __init__(self, config: ChatMixConfig):
         self.config = config
@@ -46,7 +48,7 @@ class ChatMixWindowsController:
         self.audio = AudioController(config)
         self.should_stop = False
         self.device = None
-        self.endpoint_address = None
+        self.endpoint = None
         self.last_game = None
         self.last_chat = None
 
@@ -76,50 +78,95 @@ class ChatMixWindowsController:
         self.log.info("Shutdown requested by signal %s", signum)
 
     def find_headset(self):
+        """Find the Arctis headset using pywinusb (Windows native USB HID)."""
         try:
-            import usb.core
-            import usb.backend.libusb1
+            import pywinusb.hid as hid
 
-            # Try to get libusb1 backend explicitly
-            backend = usb.backend.libusb1.get_backend()
-            if backend is None:
-                self.log.error("LibUSB backend not available. Install libusb drivers.")
-                return None
+            devices = hid.find_all_hid_devices()
+            for device in devices:
+                try:
+                    # Check if this is a SteelSeries device
+                    vendor_id = device.vendor_id
+                    product_id = device.product_id
+                    
+                    if vendor_id == self.VENDOR_ID and product_id in self.PRODUCT_IDS:
+                        self.log.info(f"Found SteelSeries headset: {device.product_name} (vendor=0x{vendor_id:04x} product=0x{product_id:04x})")
+                        self.device = device
+                        return device
+                except Exception:
+                    continue
 
-            for product_id in self.config.product_ids:
-                dev = usb.core.find(idVendor=self.config.vendor_id, idProduct=product_id, backend=backend)
-                if dev is not None:
-                    self.device = dev
-                    self.log.info("Found supported SteelSeries headset: vendor=0x%04x product=0x%04x", self.config.vendor_id, product_id)
-                    return dev
-
-            self.log.debug("No supported headset found yet.")
-            return None
-        except Exception as exc:
-            self.log.debug("USB scan error: %s", exc)
+            self.log.debug("No supported SteelSeries headset found yet.")
             return None
 
-    def attach_to_hid_endpoint(self):
-        if self.device is None:
-            return False
-
-        try:
-            self.device.set_configuration()
-            for cfg in self.device:
-                for interface in cfg:
-                    endpoints = getattr(interface, "endpoints", lambda: [])()
-                    if endpoints:
-                        self.endpoint_address = endpoints[0].bEndpointAddress
-                        self.log.info("Using HID endpoint 0x%02x", self.endpoint_address)
-                        return True
-
-            self.log.warning("No USB HID endpoint discovered for this headset.")
-            return False
         except Exception as exc:
-            self.log.exception("Unable to claim USB endpoint: %s", exc)
-            return False
+            self.log.debug(f"Error scanning HID devices: {exc}")
+            return None
 
-    def apply_mix_values(self, game_value: int, chat_value: int):
+    def run_loop(self):
+        """Poll the headset for dial input and apply volume mixing."""
+        self.log.info("Starting chatmix poll loop.")
+        self.log.info(f"Config: game_targets={self.config.game_targets}, chat_targets={self.config.chat_targets}")
+        self.log.info(f"Looking for SteelSeries Arctis headset (vendor=0x{self.VENDOR_ID:04x})...")
+
+        while not self.should_stop:
+            if self.device is None:
+                self.device = self.find_headset()
+                if self.device is None:
+                    time.sleep(2.0)  # Wait longer before retrying
+                    continue
+                else:
+                    # Try to open the device
+                    try:
+                        self.device.open()
+                        self.log.info("Device opened successfully.")
+                    except Exception as exc:
+                        self.log.warning(f"Could not open device: {exc}")
+                        self.device = None
+                        time.sleep(2.0)
+                        continue
+
+            # Device is open, read from it
+            try:
+                data = self.device.read(64)
+                if not data or len(data) < 3:
+                    continue
+
+                # Check report ID
+                if data[0] != self.CHATMIX_REPORT_ID:
+                    continue
+
+                game_value = int(data[1])
+                chat_value = int(data[2])
+
+                # Validate ranges
+                if not (0 <= game_value <= 100 and 0 <= chat_value <= 100):
+                    continue
+
+                # Apply deadband to reduce noise
+                if self.last_game is not None and self.last_chat is not None:
+                    if (abs(game_value - self.last_game) <= self.config.deadband and 
+                        abs(chat_value - self.last_chat) <= self.config.deadband):
+                        continue
+
+                self.last_game = game_value
+                self.last_chat = chat_value
+                self._apply_mix_values(game_value, chat_value)
+                self.log.debug(f"Applied volumes: game={game_value}% chat={chat_value}%")
+
+            except Exception as exc:
+                self.log.debug(f"Read error: {exc}")
+                # Device was disconnected
+                if self.device is not None:
+                    try:
+                        self.device.close()
+                    except Exception:
+                        pass
+                self.device = None
+                time.sleep(2.0)
+
+    def _apply_mix_values(self, game_value: int, chat_value: int):
+        """Apply the dial values to Windows audio endpoints."""
         if game_value is None or chat_value is None:
             return
 
@@ -131,62 +178,6 @@ class ChatMixWindowsController:
 
         if self.config.media_targets:
             self.audio.set_volume_for_targets(self.config.media_targets, self.config.media_level)
-
-    def run_loop(self):
-        self.log.info("Starting chatmix poll loop.")
-        self.log.info("Config: game_targets=%s, chat_targets=%s, media_targets=%s", self.config.game_targets, self.config.chat_targets, self.config.media_targets)
-        self.log.info("Looking for SteelSeries Arctis headset (vendor=0x%04x)...", self.config.vendor_id)
-
-        while not self.should_stop:
-            if self.device is None:
-                self.device = self.find_headset()
-                if self.device is not None:
-                    self.attach_to_hid_endpoint()
-                else:
-                    time.sleep(2.0)  # Longer wait if no device found
-                continue
-
-            if self.endpoint_address is None:
-                if not self.attach_to_hid_endpoint():
-                    self.device = None
-                    time.sleep(1.0)
-                    continue
-
-            try:
-                import usb.core
-
-                data = self.device.read(self.endpoint_address, 64, timeout=self.POLL_TIMEOUT_MS)
-                if not data or len(data) < 3:
-                    continue
-
-                if data[0] != self.CHATMIX_REPORT_ID:
-                    continue
-
-                game_value = int(data[1])
-                chat_value = int(data[2])
-
-                if not (0 <= game_value <= 100 and 0 <= chat_value <= 100):
-                    continue
-
-                if self.last_game is not None and self.last_chat is not None:
-                    if abs(game_value - self.last_game) <= self.config.deadband and abs(chat_value - self.last_chat) <= self.config.deadband:
-                        continue
-
-                self.last_game = game_value
-                self.last_chat = chat_value
-                self.apply_mix_values(game_value, chat_value)
-                self.log.debug("Applied game=%s chat=%s", game_value, chat_value)
-
-            except usb.core.USBTimeoutError:
-                continue
-            except usb.core.USBError:
-                self.log.warning("Headset disconnected; waiting for re-attach.")
-                self.device = None
-                self.endpoint_address = None
-                time.sleep(2.0)
-            except Exception as exc:
-                self.log.exception("Unhandled polling error: %s", exc)
-                time.sleep(1.0)
 
     def run(self):
         self.audio.initialize_default_targets()
@@ -218,21 +209,18 @@ def main() -> int:
             for device in list_audio_devices():
                 print(f" - {device}")
 
-            print("\n=== USB Devices ===")
+            print("\n=== USB HID Devices ===")
             try:
-                import usb.core
-                import usb.backend.libusb1
-                
-                backend = usb.backend.libusb1.get_backend()
-                if backend is None:
-                    print("  (No libusb backend available - USB HID access won't work)")
-                    print("  Install libusb from: https://github.com/libusb/libusb/releases")
-                else:
-                    for dev in usb.core.find(find_all=True, backend=backend):
+                import pywinusb.hid as hid
+                devices = hid.find_all_hid_devices()
+                if devices:
+                    for dev in devices:
                         try:
-                            print(f" - vendor=0x{dev.idVendor:04x} product=0x{dev.idProduct:04x}")
+                            print(f" - {dev.product_name} (vendor=0x{dev.vendor_id:04x} product=0x{dev.product_id:04x})")
                         except Exception:
                             pass
+                else:
+                    print("  (No USB HID devices found)")
             except Exception as exc:
                 print(f"  Error: {exc}")
             print()
@@ -295,6 +283,8 @@ if __name__ == "__main__":
 """
 Windows ChatMix service for SteelSeries Arctis 7+/Nova 7 WOW Edition
 
+Uses Windows' native USB HID API (via pywinusb) - no libusb required.
+
 Usage:
     ChatMixWindows.exe                      (run service in foreground)
     ChatMixWindows.exe --tray               (run service in background)
@@ -302,7 +292,4 @@ Usage:
     ChatMixWindows.exe --install-autostart  (add to Windows startup)
     ChatMixWindows.exe --remove-autostart   (remove from Windows startup)
     ChatMixWindows.exe --create-sample-config (generate default config)
-
-Note: Requires libusb drivers for USB HID access.
-Download from: https://github.com/libusb/libusb/releases
 """
