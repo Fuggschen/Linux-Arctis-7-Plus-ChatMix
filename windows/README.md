@@ -1,19 +1,24 @@
 # Windows ChatMix
 
-This directory contains the Windows-oriented rewrite of the Linux ChatMix daemon.
+This directory contains the Windows rewrite of the original Linux-based ChatMix daemon.
 
-What is included:
-- USB headset detection and dial polling for Arctis 7+ / Nova 7 WOW Edition
-- Windows audio endpoint targeting with configurable output devices
-- per-channel mapping for Game / Chat / Media
-- autostart installation via the Windows Startup folder
-- background/tray execution support
+The implementation keeps the same functional idea:
+- detect the SteelSeries Arctis headset and poll its USB HID reports
+- read the knob position from the dial's interrupt endpoint
+- map the dial values into Game/Chat balance
+- apply them to Windows audio output targets selected in config.json
+- support autostart and headless/background mode
 
-Usage:
+Quick start:
 
+  python windows/chatmix_windows.py --create-sample-config
   python windows/chatmix_windows.py --list-devices
   python windows/chatmix_windows.py --install-autostart
-  python windows/chatmix_windows.py --run-in-background
   python windows/chatmix_windows.py --tray
 
-The implementation is intentionally structured to be easier to port and extend than the original Linux-only PipeWire logic.
+Config file:
+- default path on Windows: %APPDATA%\ChatMixWindows\config.json
+- keys include game_targets, chat_targets, media_targets, media_level, deadband, and log_path
+
+The app is intentionally structured to mirror the Linux logic while replacing PipeWire and systemd with Windows-compatible equivalents.
+

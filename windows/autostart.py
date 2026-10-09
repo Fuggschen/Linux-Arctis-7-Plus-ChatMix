@@ -1,48 +1,55 @@
-import json
+from __future__ import annotations
+
 import os
-from dataclasses import dataclass, field
+import subprocess
+import sys
 from pathlib import Path
 
 
-def default_config_path() -> Path:
-    if os.name == "nt":
-        return Path.home() / "AppData" / "Roaming" / "ChatMixWindows" / "config.json"
-    return Path.home() / ".chatmix_windows.json"
+def _startup_link_path() -> Path:
+    if os.name != "nt":
+        raise RuntimeError("Autostart is only supported on Windows.")
+    return Path.home() / "AppData" / "Roaming" / "Microsoft" / "Windows" / "Start Menu" / "Programs" / "Startup" / "ChatMixWindows.lnk"
 
 
-@dataclass
-class ChatMixConfig:
-    debug: bool = False
-    vendor_id: int = 0x1038
-    product_ids: list[int] = field(default_factory=lambda: [0x220e, 0x227a])
-    game_targets: list[str] = field(default_factory=lambda: ["Default", "Headphones"]) 
-    chat_targets: list[str] = field(default_factory=lambda: ["Discord", "Teams", "VoiceChat"]) 
-    media_targets: list[str] = field(default_factory=lambda: ["Media"]) 
-    media_level: float = 0.7
-    polling_interval_ms: int = 20
-    deadband: int = 3
-    tray_mode: bool = False
-    log_path: str = str(Path.home() / "AppData" / "Local" / "ChatMixWindows" / "chatmix.log")
+def install_autostart(config_path: str | None = None) -> Path:
+    if os.name != "nt":
+        raise RuntimeError("Autostart is only supported on Windows.")
 
-    @classmethod
-    def load(cls, path: str | None = None):
-        target = Path(path) if path else default_config_path()
-        if target.exists():
-            with target.open("r", encoding="utf-8") as handle:
-                data = json.load(handle)
-            return cls(**data)
-        cfg = cls()
-        cfg.save(str(target))
-        return cfg
+    config_target = Path(config_path) if config_path else Path.home() / "AppData" / "Roaming" / "ChatMixWindows" / "config.json"
+    script_path = Path(__file__).resolve().parent / "chatmix_windows.py"
+    python_exe = sys.executable
+    shortcut_path = _startup_link_path()
+    shortcut_path.parent.mkdir(parents=True, exist_ok=True)
 
-    def save(self, path: str | None = None):
-        target = Path(path) if path else default_config_path()
-        target.parent.mkdir(parents=True, exist_ok=True)
-        with target.open("w", encoding="utf-8") as handle:
-            json.dump(self.__dict__, handle, indent=2)
+    powershell = [
+        "-NoProfile",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-Command",
+        (
+            "$WshShell = New-Object -ComObject WScript.Shell; "
+            f"$Shortcut = $WshShell.CreateShortcut('{shortcut_path}'); "
+            f"$Shortcut.TargetPath = '{python_exe}'; "
+            f"$Shortcut.Arguments = '"{script_path}" --tray --config "{config_target}"'; "
+            f"$Shortcut.WorkingDirectory = '{script_path.parent}'; "
+            "$Shortcut.Save()"
+        ),
+    ]
+
+    subprocess.run(["powershell", *powershell], check=True)
+    print(f"Autostart shortcut created at: {shortcut_path}")
+    return shortcut_path
 
 
-def create_sample_config(path: str | None = None):
-    config = ChatMixConfig()
-    config.save(path)
-    return config
+def remove_autostart() -> None:
+    if os.name != "nt":
+        raise RuntimeError("Autostart is only supported on Windows.")
+
+    shortcut_path = _startup_link_path()
+    if shortcut_path.exists():
+        shortcut_path.unlink()
+        print(f"Removed autostart shortcut: {shortcut_path}")
+    else:
+        print("No autostart shortcut found.")
+

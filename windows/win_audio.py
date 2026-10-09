@@ -1,46 +1,65 @@
+from __future__ import annotations
+
 import os
 import subprocess
-import sys
-from pathlib import Path
+
+try:
+    from pycaw.pycaw import AudioUtilities, IAudioEndpointVolume
+except Exception:  # pragma: no cover - optional dependency
+    AudioUtilities = None
+    IAudioEndpointVolume = None
 
 
-def _startup_link_path() -> Path:
+def list_audio_devices() -> list[str]:
     if os.name != "nt":
-        raise RuntimeError("Auto-start is only supported on Windows.")
-    return Path.home() / "AppData" / "Roaming" / "Microsoft" / "Windows" / "Start Menu" / "Programs" / "Startup" / "ChatMixWindows.lnk"
+        return []
+
+    if AudioUtilities is not None:
+        try:
+            # pycaw does not provide a simple list of endpoints, so this is a practical fallback.
+            import pycaw
+            return ["Default playback device"]
+        except Exception:
+            pass
+
+    try:
+        result = subprocess.run(
+            [
+                "powershell",
+                "-NoProfile",
+                "-Command",
+                "Get-CimInstance Win32_SoundDevice | Select-Object -ExpandProperty Name",
+            ],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        return [line.strip() for line in result.stdout.splitlines() if line.strip()]
+    except Exception as exc:  # pragma: no cover - environment dependent
+        return [f"Error enumerating devices: {exc}"]
 
 
-def install_autostart():
-    if os.name != "nt":
-        raise RuntimeError("Auto-start is only supported on Windows.")
+class AudioController:
+    def __init__(self, config):
+        self.config = config
 
-    script_path = Path(__file__).resolve().parent / "chatmix_windows.py"
-    python_path = sys.executable
-    target = _startup_link_path()
-    target.parent.mkdir(parents=True, exist_ok=True)
+    def initialize_default_targets(self):
+        if self.config.game_targets and self.config.chat_targets:
+            return
+        self.config.game_targets = ["Default"]
+        self.config.chat_targets = ["Default"]
 
-    # This uses PowerShell's Shell.Link COM object for a reliable shortcut.
-    ps = [
-        "-NoProfile",
-        "-ExecutionPolicy",
-        "Bypass",
-        "-Command",
-        "$WshShell = New-Object -ComObject WScript.Shell; $Shortcut = $WshShell.CreateShortcut('" + str(target) + "'); "
-        "$Shortcut.TargetPath = '" + python_path + "'; "
-        "$Shortcut.Arguments = '" + str(script_path) + " --tray'; "
-        "$Shortcut.WorkingDirectory = '" + str(script_path.parent) + "'; "
-        "$Shortcut.Save()"
-    ]
-    subprocess.run(["powershell", *ps], check=True)
-    print(f"Autostart shortcut installed: {target}")
+    def set_volume_for_targets(self, targets: list[str], volume: float):
+        if AudioUtilities is None:
+            return
 
+        volume = max(0.0, min(1.0, float(volume)))
+        endpoint = AudioUtilities.GetSpeakers()
+        interface = endpoint.Activate(
+            IAudioEndpointVolume._iid_,
+            0,
+            None,
+        )
+        master = interface.QueryInterface(IAudioEndpointVolume)
+        master.SetMasterVolumeLevelScalar(volume, None)
 
-def remove_autostart():
-    if os.name != "nt":
-        raise RuntimeError("Auto-start is only supported on Windows.")
-    target = _startup_link_path()
-    if target.exists():
-        target.unlink()
-        print(f"Removed autostart shortcut: {target}")
-    else:
-        print("No autostart shortcut found.")
